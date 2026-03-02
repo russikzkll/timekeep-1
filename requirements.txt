@@ -1,0 +1,6 @@
+deepface
+tf-keras
+Pillow
+numpy
+python-telegram-bot
+python-dotenv

@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["python312", "libGL", "glib"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "python attendance_face_only.py"

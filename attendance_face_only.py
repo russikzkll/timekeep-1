@@ -20,11 +20,13 @@ FACE_DISTANCE_THRESHOLD = 0.40
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
 os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
 
+DEEPFACE_IMPORT_ERROR = ''
 try:
     from deepface import DeepFace
     FACE_RECOGNITION_AVAILABLE = True
-except ImportError:
+except Exception as e:
     FACE_RECOGNITION_AVAILABLE = False
+    DEEPFACE_IMPORT_ERROR = str(e)
 
 MAIN_HTML = r"""<!DOCTYPE html>
 <html lang="ru">
@@ -624,7 +626,8 @@ def cosine_distance(a, b):
 
 def register_face(name, image_base64):
     if not FACE_RECOGNITION_AVAILABLE:
-        return False, "deepface не установлен. Запустите: pip install deepface Pillow numpy tf-keras"
+        reason = f" Причина: {DEEPFACE_IMPORT_ERROR}" if DEEPFACE_IMPORT_ERROR else ''
+        return False, f"deepface недоступен.{reason}"
     embedding, err = get_embedding(image_base64)
     if embedding is None:
         return False, err or "Лицо не найдено на фото. Встаньте ближе к камере."
@@ -638,7 +641,8 @@ def register_face(name, image_base64):
 
 def identify_face(image_base64):
     if not FACE_RECOGNITION_AVAILABLE:
-        return False, "deepface не установлен. Запустите: pip install deepface Pillow numpy tf-keras", None
+        reason = f" Причина: {DEEPFACE_IMPORT_ERROR}" if DEEPFACE_IMPORT_ERROR else ''
+        return False, f"deepface недоступен.{reason}", None
     embedding, err = get_embedding(image_base64)
     if embedding is None:
         return False, err or "Лицо не обнаружено.", None

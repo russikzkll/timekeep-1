@@ -2,7 +2,7 @@
 nixPkgs = ["python312", "python312Packages.pip", "libGL", "glib"]
 
 [phases.install]
-cmds = ["python -m pip install -r requirements.txt"]
+cmds = ["pip3 install -r requirements.txt"]
 
 [start]
 cmd = "python attendance_face_only.py"

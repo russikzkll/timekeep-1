@@ -9,7 +9,7 @@ import pickle
 import numpy as np
 import io
 
-PORT = 8000
+PORT = int(os.getenv("PORT", "8000"))
 DATA_FILE = 'attendance.json'
 FACES_FILE = 'faces_data.pkl'
 WORK_START = time(14, 0)

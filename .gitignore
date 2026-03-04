@@ -1,8 +1,0 @@
-.env
-attendance.json
-_tmp_face.jpg
-__pycache__/
-*.pyc
-.venv/
-venv/
-*.log

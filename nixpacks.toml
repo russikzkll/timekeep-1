@@ -1,10 +1,11 @@
 [phases.setup]
-nixPkgs = ["python312", "python312Packages.pip", "libGL", "glib"]
+nixPkgs = ["python312", "libGL", "glib"]
 
 [phases.install]
 cmds = [
-  "python -m pip install --break-system-packages -r requirements.txt"
+  "python -m venv /opt/venv",
+  "/opt/venv/bin/pip install --no-cache-dir -r requirements.txt"
 ]
 
 [start]
-cmd = "python attendance_face_only.py"
+cmd = "/opt/venv/bin/python attendance_face_only.py"

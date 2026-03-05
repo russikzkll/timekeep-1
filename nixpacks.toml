@@ -1,5 +1,13 @@
 [phases.setup]
-nixPkgs = ["python311", "libGL", "glib"]
+nixPkgs = [
+  "python311",
+  "libglvnd",
+  "glib",
+  "xorg.libX11",
+  "xorg.libXext",
+  "xorg.libXrender",
+  "xorg.libSM"
+]
 
 [phases.install]
 cmds = [

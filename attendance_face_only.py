@@ -2,7 +2,7 @@ import http.server
 import socketserver
 import json
 import os
-from datetime import datetime, time
+from datetime import datetime, time, timezone, timedelta
 from urllib.parse import urlparse, parse_qs
 import base64
 import pickle
@@ -16,6 +16,14 @@ WORK_START = time(14, 0)
 WORK_END = time(17, 30)
 ADMIN_PASSWORD = 'admin123'
 FACE_DISTANCE_THRESHOLD = 0.40
+
+
+ATYRAU_TZ = timezone(timedelta(hours=5), "Asia/Atyrau")
+
+
+def now_atyrau() -> datetime:
+    return datetime.now(ATYRAU_TZ)
+
 
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
 os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
@@ -695,12 +703,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == '/admin':
             self._html(ADMIN_HTML)
         elif p == '/api/status':
-            today = datetime.now().strftime('%Y-%m-%d')
+            today = now_atyrau().strftime('%Y-%m-%d')
             data = load_data()
             self._json(200, data.get(today, []))
         elif p == '/api/time_left':
-            now = datetime.now()
-            end_dt = datetime.combine(now.date(), WORK_END)
+            now = now_atyrau()
+            end_dt = datetime.combine(now.date(), WORK_END, tzinfo=ATYRAU_TZ)
             if now > end_dt:
                 self._json(200, {'time_left': 'Рабочий день окончен', 'finished': True})
             else:
@@ -730,7 +738,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not success:
                 self._json(200, {'success': False, 'message': message})
                 return
-            today = datetime.now().strftime('%Y-%m-%d')
+            today = now_atyrau().strftime('%Y-%m-%d')
             data = load_data()
             already = any(e['name'].lower() == name.lower() for e in data.get(today, []))
             self._json(200, {'success': True, 'name': name, 'already_checked_in': already})
@@ -742,7 +750,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not name:
                 self._json(400, {'error': 'Имя не передано'})
                 return
-            now = datetime.now()
+            now = now_atyrau()
             today = now.strftime('%Y-%m-%d')
             data = load_data()
             data.setdefault(today, [])
@@ -752,7 +760,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
             is_late = False
             if status_type == 'present':
-                start_dt = datetime.combine(now.date(), WORK_START)
+                start_dt = datetime.combine(now.date(), WORK_START, tzinfo=ATYRAU_TZ)
                 is_late = now > start_dt
                 late_min = int((now - start_dt).total_seconds() / 60)
                 status_text = f'Опоздал на {late_min} мин.' if is_late else 'Вовремя'

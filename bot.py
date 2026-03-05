@@ -5,7 +5,7 @@ import math
 import io
 import tempfile
 import numpy as np
-from datetime import datetime, time
+from datetime import datetime, time, timezone, timedelta
 from PIL import Image
 
 from telegram import (
@@ -44,6 +44,14 @@ WORK_END = time(17, 30)
 
 FACE_THRESHOLD = 0.40
 
+
+ATYRAU_TZ = timezone(timedelta(hours=5), "Asia/Atyrau")
+
+
+def now_atyrau() -> datetime:
+    return datetime.now(ATYRAU_TZ)
+
+
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
@@ -78,20 +86,20 @@ def save_attendance(data):
 
 
 def already_checked_in(name: str) -> bool:
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_atyrau().strftime("%Y-%m-%d")
     data = load_attendance()
     return any(e["name"].lower() == name.lower() for e in data.get(today, []))
 
 
 def record_attendance(name: str, status_type: str) -> str:
-    now = datetime.now()
+    now = now_atyrau()
     today = now.strftime("%Y-%m-%d")
     data = load_attendance()
     data.setdefault(today, [])
 
     is_late = False
     if status_type == "present":
-        start_dt = datetime.combine(now.date(), WORK_START)
+        start_dt = datetime.combine(now.date(), WORK_START, tzinfo=ATYRAU_TZ)
         is_late = now > start_dt
         late_min = int((now - start_dt).total_seconds() / 60)
         status_text = f"Опоздал на {late_min} мин." if is_late else "Вовремя"

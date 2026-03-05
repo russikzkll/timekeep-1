@@ -5,7 +5,7 @@ import math
 import io
 import tempfile
 import numpy as np
-from datetime import datetime, time
+from datetime import datetime, time, timezone, timedelta
 from PIL import Image
 
 from telegram import (
@@ -22,6 +22,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.error import Conflict
 
 try:
     from dotenv import load_dotenv
@@ -43,14 +44,24 @@ WORK_END = time(17, 30)
 
 FACE_THRESHOLD = 0.40
 
+
+ATYRAU_TZ = timezone(timedelta(hours=5), "Asia/Atyrau")
+
+
+def now_atyrau() -> datetime:
+    return datetime.now(ATYRAU_TZ)
+
+
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
+DEEPFACE_IMPORT_ERROR = ""
 try:
     from deepface import DeepFace
     DEEPFACE_OK = True
-except ImportError:
+except Exception as e:
     DEEPFACE_OK = False
+    DEEPFACE_IMPORT_ERROR = str(e)
 
 SELECT_NAME, VERIFY_FACE, SEND_LOCATION, SELECT_STATUS = range(4)
 
@@ -75,20 +86,20 @@ def save_attendance(data):
 
 
 def already_checked_in(name: str) -> bool:
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_atyrau().strftime("%Y-%m-%d")
     data = load_attendance()
     return any(e["name"].lower() == name.lower() for e in data.get(today, []))
 
 
 def record_attendance(name: str, status_type: str) -> str:
-    now = datetime.now()
+    now = now_atyrau()
     today = now.strftime("%Y-%m-%d")
     data = load_attendance()
     data.setdefault(today, [])
 
     is_late = False
     if status_type == "present":
-        start_dt = datetime.combine(now.date(), WORK_START)
+        start_dt = datetime.combine(now.date(), WORK_START, tzinfo=ATYRAU_TZ)
         is_late = now > start_dt
         late_min = int((now - start_dt).total_seconds() / 60)
         status_text = f"Опоздал на {late_min} мин." if is_late else "Вовремя"
@@ -127,7 +138,8 @@ def cosine_distance(a, b):
 
 def verify_face_bytes(image_bytes: bytes, expected_name: str) -> tuple[bool, str]:
     if not DEEPFACE_OK:
-        return False, "DeepFace не установлен."
+        reason = f" Причина: {DEEPFACE_IMPORT_ERROR}" if DEEPFACE_IMPORT_ERROR else ""
+        return False, f"DeepFace недоступен.{reason}"
 
     faces = load_faces()
     key = expected_name.lower()
@@ -298,6 +310,17 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    if isinstance(err, Conflict):
+        print(
+            "Ошибка Telegram Conflict: одновременно запущено несколько экземпляров бота "
+            "с одним BOT_TOKEN. Оставьте только один инстанс/реплику."
+        )
+        return
+    print(f"Необработанная ошибка: {err}")
+
+
 def main():
     if not BOT_TOKEN:
         print("Ошибка: BOT_TOKEN не задан в .env")
@@ -318,7 +341,8 @@ def main():
     )
 
     app.add_handler(conv)
-    app.run_polling()
+    app.add_error_handler(error_handler)
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":

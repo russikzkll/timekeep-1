@@ -2,7 +2,12 @@ import http.server
 import socketserver
 import json
 import os
-from datetime import datetime, time
+import logging
+import traceback
+import ctypes
+import ctypes.util
+import platform
+from datetime import datetime, time, timezone, timedelta
 from urllib.parse import urlparse, parse_qs
 import base64
 import pickle
@@ -17,14 +22,57 @@ WORK_END = time(17, 30)
 ADMIN_PASSWORD = 'admin123'
 FACE_DISTANCE_THRESHOLD = 0.40
 
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [timekeep-web] %(message)s'
+)
+logger = logging.getLogger('timekeep.web')
+
+
+ATYRAU_TZ = timezone(timedelta(hours=5), "Asia/Atyrau")
+
+
+def now_atyrau() -> datetime:
+    return datetime.now(ATYRAU_TZ)
+
+
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
 os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
 
+DEEPFACE_IMPORT_ERROR = ''
 try:
     from deepface import DeepFace
     FACE_RECOGNITION_AVAILABLE = True
-except ImportError:
+except Exception as e:
     FACE_RECOGNITION_AVAILABLE = False
+    DEEPFACE_IMPORT_ERROR = str(e)
+    logger.exception('DeepFace import failed during startup')
+
+
+def runtime_diagnostics() -> dict:
+    libraries = {}
+    for lib in ('GL', 'glib-2.0', 'X11', 'Xext', 'Xrender', 'SM'):
+        found = ctypes.util.find_library(lib)
+        libraries[lib] = found
+
+    gl_load_error = ''
+    gl_load_ok = False
+    try:
+        ctypes.CDLL('libGL.so.1')
+        gl_load_ok = True
+    except OSError as e:
+        gl_load_error = str(e)
+
+    return {
+        'python_version': platform.python_version(),
+        'platform': platform.platform(),
+        'face_recognition_available': FACE_RECOGNITION_AVAILABLE,
+        'deepface_import_error': DEEPFACE_IMPORT_ERROR,
+        'library_lookup': libraries,
+        'libGL_load_ok': gl_load_ok,
+        'libGL_load_error': gl_load_error,
+    }
 
 MAIN_HTML = r"""<!DOCTYPE html>
 <html lang="ru">
@@ -595,6 +643,7 @@ def save_temp_image(image_base64):
     return tmp_path
 
 def get_embedding(image_base64):
+    logger.info('Face embedding requested: payload_size=%s', len(image_base64 or ''))
     tmp = save_temp_image(image_base64)
     try:
         result = DeepFace.represent(
@@ -608,6 +657,7 @@ def get_embedding(image_base64):
         return np.array(result[0]['embedding']), None
     except Exception as e:
         msg = str(e)
+        logger.exception('DeepFace.represent failed')
         if 'Face could not be detected' in msg or 'cannot detect' in msg.lower():
             return None, "Лицо не обнаружено. Встаньте прямо, обеспечьте хорошее освещение."
         return None, f"Ошибка: {msg}"
@@ -623,8 +673,11 @@ def cosine_distance(a, b):
     return float(1.0 - np.dot(a, b))
 
 def register_face(name, image_base64):
+    logger.info('Register face called: name=%s', name)
     if not FACE_RECOGNITION_AVAILABLE:
-        return False, "deepface не установлен. Запустите: pip install deepface Pillow numpy tf-keras"
+        reason = f" Причина: {DEEPFACE_IMPORT_ERROR}" if DEEPFACE_IMPORT_ERROR else ''
+        logger.error('Register face unavailable: %s', reason)
+        return False, f"deepface недоступен.{reason}"
     embedding, err = get_embedding(image_base64)
     if embedding is None:
         return False, err or "Лицо не найдено на фото. Встаньте ближе к камере."
@@ -637,8 +690,11 @@ def register_face(name, image_base64):
     return True, f'Сотрудник "{name}" зарегистрирован'
 
 def identify_face(image_base64):
+    logger.info('Identify face called: payload_size=%s', len(image_base64 or ''))
     if not FACE_RECOGNITION_AVAILABLE:
-        return False, "deepface не установлен. Запустите: pip install deepface Pillow numpy tf-keras", None
+        reason = f" Причина: {DEEPFACE_IMPORT_ERROR}" if DEEPFACE_IMPORT_ERROR else ''
+        logger.error('Identify face unavailable: %s', reason)
+        return False, f"deepface недоступен.{reason}", None
     embedding, err = get_embedding(image_base64)
     if embedding is None:
         return False, err or "Лицо не обнаружено.", None
@@ -662,9 +718,10 @@ def identify_face(image_base64):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass
+        logger.info('HTTP %s - %s', self.address_string(), fmt % args)
 
     def _json(self, status, data):
+        logger.info('Respond JSON: status=%s path=%s', status, self.path)
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -672,6 +729,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _html(self, content, status=200):
+        logger.info('Respond HTML: status=%s path=%s', status, self.path)
         body = content.encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -681,137 +739,153 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _read_json(self):
         length = int(self.headers.get('Content-Length', 0))
         raw = self.rfile.read(length)
+        logger.info('Read JSON body: path=%s length=%s', self.path, length)
         return json.loads(raw.decode('utf-8'))
 
     def do_GET(self):
         p = urlparse(self.path).path
+        logger.info('Incoming GET: path=%s query=%s', p, urlparse(self.path).query)
 
-        if p == '/':
-            self._html(MAIN_HTML)
-        elif p == '/admin':
-            self._html(ADMIN_HTML)
-        elif p == '/api/status':
-            today = datetime.now().strftime('%Y-%m-%d')
-            data = load_data()
-            self._json(200, data.get(today, []))
-        elif p == '/api/time_left':
-            now = datetime.now()
-            end_dt = datetime.combine(now.date(), WORK_END)
-            if now > end_dt:
-                self._json(200, {'time_left': 'Рабочий день окончен', 'finished': True})
+        try:
+            if p == '/':
+                self._html(MAIN_HTML)
+            elif p == '/admin':
+                self._html(ADMIN_HTML)
+            elif p == '/api/status':
+                today = now_atyrau().strftime('%Y-%m-%d')
+                data = load_data()
+                self._json(200, data.get(today, []))
+            elif p == '/api/time_left':
+                now = now_atyrau()
+                end_dt = datetime.combine(now.date(), WORK_END, tzinfo=ATYRAU_TZ)
+                if now > end_dt:
+                    self._json(200, {'time_left': 'Рабочий день окончен', 'finished': True})
+                else:
+                    diff = end_dt - now
+                    h, rem = divmod(int(diff.total_seconds()), 3600)
+                    m, s = divmod(rem, 60)
+                    self._json(200, {'time_left': f'{h:02d}:{m:02d}:{s:02d}', 'finished': False})
+            elif p.startswith('/api/admin/employees'):
+                qs = parse_qs(urlparse(self.path).query)
+                pw = qs.get('password', [''])[0]
+                if pw != ADMIN_PASSWORD:
+                    self._json(403, {'error': 'Неверный пароль'})
+                    return
+                faces = load_faces()
+                names = [faces[k]['display_name'] for k in faces]
+                self._json(200, {'employees': names})
+            elif p == '/api/debug/runtime':
+                self._json(200, runtime_diagnostics())
             else:
-                diff = end_dt - now
-                h, rem = divmod(int(diff.total_seconds()), 3600)
-                m, s = divmod(rem, 60)
-                self._json(200, {'time_left': f'{h:02d}:{m:02d}:{s:02d}', 'finished': False})
-        elif p.startswith('/api/admin/employees'):
-            qs = parse_qs(urlparse(self.path).query)
-            pw = qs.get('password', [''])[0]
-            if pw != ADMIN_PASSWORD:
-                self._json(403, {'error': 'Неверный пароль'})
-                return
-            faces = load_faces()
-            names = [faces[k]['display_name'] for k in faces]
-            self._json(200, {'employees': names})
-        else:
-            self._html('<h1>404</h1>', 404)
+                self._html('<h1>404</h1>', 404)
+        except Exception:
+            logger.error('Unhandled GET error path=%s\n%s', p, traceback.format_exc())
+            self._json(500, {'error': 'Внутренняя ошибка сервера. Смотрите логи Railway.'})
 
     def do_POST(self):
         p = urlparse(self.path).path
+        logger.info('Incoming POST: path=%s', p)
 
-        if p == '/api/identify-face':
-            payload = self._read_json()
-            image = payload.get('image', '')
-            success, message, name = identify_face(image)
-            if not success:
-                self._json(200, {'success': False, 'message': message})
-                return
-            today = datetime.now().strftime('%Y-%m-%d')
-            data = load_data()
-            already = any(e['name'].lower() == name.lower() for e in data.get(today, []))
-            self._json(200, {'success': True, 'name': name, 'already_checked_in': already})
-
-        elif p == '/api/face-checkin':
-            payload = self._read_json()
-            name = payload.get('name', '').strip()
-            status_type = payload.get('status', 'present')
-            if not name:
-                self._json(400, {'error': 'Имя не передано'})
-                return
-            now = datetime.now()
-            today = now.strftime('%Y-%m-%d')
-            data = load_data()
-            data.setdefault(today, [])
-            for entry in data[today]:
-                if entry['name'].lower() == name.lower():
-                    self._json(400, {'error': 'Уже отмечен сегодня'})
+        try:
+            if p == '/api/identify-face':
+                payload = self._read_json()
+                image = payload.get('image', '')
+                success, message, name = identify_face(image)
+                if not success:
+                    self._json(200, {'success': False, 'message': message})
                     return
-            is_late = False
-            if status_type == 'present':
-                start_dt = datetime.combine(now.date(), WORK_START)
-                is_late = now > start_dt
-                late_min = int((now - start_dt).total_seconds() / 60)
-                status_text = f'Опоздал на {late_min} мин.' if is_late else 'Вовремя'
-            elif status_type == 'absent':
-                status_text = 'Не придет'
+                today = now_atyrau().strftime('%Y-%m-%d')
+                data = load_data()
+                already = any(e['name'].lower() == name.lower() for e in data.get(today, []))
+                self._json(200, {'success': True, 'name': name, 'already_checked_in': already})
+
+            elif p == '/api/face-checkin':
+                payload = self._read_json()
+                name = payload.get('name', '').strip()
+                status_type = payload.get('status', 'present')
+                if not name:
+                    self._json(400, {'error': 'Имя не передано'})
+                    return
+                now = now_atyrau()
+                today = now.strftime('%Y-%m-%d')
+                data = load_data()
+                data.setdefault(today, [])
+                for entry in data[today]:
+                    if entry['name'].lower() == name.lower():
+                        self._json(400, {'error': 'Уже отмечен сегодня'})
+                        return
+                is_late = False
+                if status_type == 'present':
+                    start_dt = datetime.combine(now.date(), WORK_START, tzinfo=ATYRAU_TZ)
+                    is_late = now > start_dt
+                    late_min = int((now - start_dt).total_seconds() / 60)
+                    status_text = f'Опоздал на {late_min} мин.' if is_late else 'Вовремя'
+                elif status_type == 'absent':
+                    status_text = 'Не придет'
+                else:
+                    status_text = 'В отпуске'
+                entry = {
+                    'name': name,
+                    'time': now.strftime('%H:%M'),
+                    'status': status_text,
+                    'type': status_type,
+                    'is_late': is_late,
+                    'verified': True
+                }
+                data[today].append(entry)
+                save_data(data)
+                self._json(200, entry)
+
+            elif p == '/api/admin/auth':
+                payload = self._read_json()
+                ok = payload.get('password') == ADMIN_PASSWORD
+                self._json(200, {'success': ok})
+
+            elif p == '/api/admin/register-face':
+                payload = self._read_json()
+                if payload.get('password') != ADMIN_PASSWORD:
+                    self._json(403, {'success': False, 'message': 'Неверный пароль'})
+                    return
+                name = payload.get('name', '').strip()
+                image = payload.get('image', '')
+                if not name:
+                    self._json(400, {'success': False, 'message': 'Введите имя'})
+                    return
+                ok, msg = register_face(name, image)
+                self._json(200, {'success': ok, 'message': msg})
+
+            elif p == '/api/admin/delete-employee':
+                payload = self._read_json()
+                if payload.get('password') != ADMIN_PASSWORD:
+                    self._json(403, {'success': False, 'message': 'Неверный пароль'})
+                    return
+                name = payload.get('name', '').strip().lower()
+                faces = load_faces()
+                deleted = False
+                for key in list(faces.keys()):
+                    if key.lower() == name:
+                        del faces[key]
+                        deleted = True
+                        break
+                if deleted:
+                    save_faces(faces)
+                    self._json(200, {'success': True})
+                else:
+                    self._json(404, {'success': False, 'message': 'Сотрудник не найден'})
+
             else:
-                status_text = 'В отпуске'
-            entry = {
-                'name': name,
-                'time': now.strftime('%H:%M'),
-                'status': status_text,
-                'type': status_type,
-                'is_late': is_late,
-                'verified': True
-            }
-            data[today].append(entry)
-            save_data(data)
-            self._json(200, entry)
-
-        elif p == '/api/admin/auth':
-            payload = self._read_json()
-            ok = payload.get('password') == ADMIN_PASSWORD
-            self._json(200, {'success': ok})
-
-        elif p == '/api/admin/register-face':
-            payload = self._read_json()
-            if payload.get('password') != ADMIN_PASSWORD:
-                self._json(403, {'success': False, 'message': 'Неверный пароль'})
-                return
-            name = payload.get('name', '').strip()
-            image = payload.get('image', '')
-            if not name:
-                self._json(400, {'success': False, 'message': 'Введите имя'})
-                return
-            ok, msg = register_face(name, image)
-            self._json(200, {'success': ok, 'message': msg})
-
-        elif p == '/api/admin/delete-employee':
-            payload = self._read_json()
-            if payload.get('password') != ADMIN_PASSWORD:
-                self._json(403, {'success': False, 'message': 'Неверный пароль'})
-                return
-            name = payload.get('name', '').strip().lower()
-            faces = load_faces()
-            deleted = False
-            for key in list(faces.keys()):
-                if key.lower() == name:
-                    del faces[key]
-                    deleted = True
-                    break
-            if deleted:
-                save_faces(faces)
-                self._json(200, {'success': True})
-            else:
-                self._json(404, {'success': False, 'message': 'Сотрудник не найден'})
-
-        else:
-            self._html('<h1>404</h1>', 404)
+                self._html('<h1>404</h1>', 404)
+        except Exception:
+            logger.error('Unhandled POST error path=%s\n%s', p, traceback.format_exc())
+            self._json(500, {'error': 'Внутренняя ошибка сервера. Смотрите логи Railway.'})
 
 
 if __name__ == '__main__':
-    print(f"Откройте браузер: http://localhost:{PORT}")
-    print(f"Админ-панель:     http://localhost:{PORT}/admin  (пароль: {ADMIN_PASSWORD})")
+    logger.info('Web app starting on port=%s', PORT)
+    logger.info('DeepFace available=%s', FACE_RECOGNITION_AVAILABLE)
+    logger.info('Runtime diagnostics: %s', json.dumps(runtime_diagnostics(), ensure_ascii=False))
+    logger.info('Откройте браузер: http://localhost:%s', PORT)
+    logger.info('Админ-панель:     http://localhost:%s/admin  (пароль: %s)', PORT, ADMIN_PASSWORD)
 
     with socketserver.TCPServer(('', PORT), Handler) as httpd:
         try:
